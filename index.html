@@ -220,7 +220,6 @@
             handleDragStart(e, header);
           };
 
-          // Обработчик dragend для сброса состояний при отпускании за пределами заголовка/таблицы
           dragHandle.ondragend = () => {
             isDragging = false;
             wasDragged = false;
