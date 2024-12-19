@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>JSON to Table</title>
+    <style>
+      body {
+        font-family: "Roboto", sans-serif;
+        margin: 0;
+        padding: 20px;
+        background-color: #f5f5f5;
+        color: #333;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 500;
+        color: #3f51b5;
+        margin-bottom: 20px;
+      }
+      button {
+        background-color: #3f51b5;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 8px 16px;
+        cursor: pointer;
+        font-size: 12px;
+        transition: background-color 0.3s;
+      }
+      button:hover {
+        background-color: #303f9f;
+      }
+      input[type="text"] {
+        margin-bottom: 20px;
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 12px;
+        box-sizing: border-box;
+      }
+      select {
+        margin-bottom: 20px;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 12px;
+        box-sizing: border-box;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        background-color: #fff;
+        border-radius: 4px;
+        overflow: hidden;
+        font-size: 11px;
+        table-layout: fixed; 
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 8px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        user-select: none;
+      }
+      th {
+        background-color: #3f51b5;
+        color: #fff;
+        position: relative;
+      }
+      tr:nth-child(even) {
+        background-color: #f9f9f9;
+      }
+      tr:hover {
+        background-color: #f1f1f1;
+      }
+      .hidden {
+        display: none;
+      }
+      .column-name {
+        vertical-align: middle;
+      }
+      .sort-arrow {
+        vertical-align: middle;
+        width: 1em;
+        display: inline-block;
+        text-align: center;
+      }
+      .drag-handle {
+        vertical-align: middle;
+        cursor: move;
+        margin-left: 8px;
+      }
+      th.sort-asc {}
+      th.sort-desc {}
+
+      .resizer {
+        display: inline-block;
+        width: 4px;
+        cursor: col-resize;
+        background-color: transparent;
+        height: 100%;
+        position: absolute;
+        right: 0;
+        top: 0;
+        z-index: 10;
+        user-select: none;
+        pointer-events: all; 
+      }
+      .resizer[draggable="false"] {
+        -webkit-user-drag: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Paste JSON from Clipboard</h1>
+    <button onclick="pasteJson()">Paste JSON</button>
+    <select id="hiddenColumnsDropdown" onchange="restoreColumn(this.value)">
+      <option value="" disabled selected>Restore Hidden Columns</option>
+    </select>
+    <input
+      type="text"
+      id="filter"
+      placeholder="Filter rows..."
+      oninput="filterTable()"
+    />
+    <table id="jsonTable">
+      <thead id="tableHead"></thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+
+    <script>
+      let sortDirections = {};
+      let hiddenColumns = JSON.parse(localStorage.getItem("hiddenColumns")) || [];
+      let columnOrder = JSON.parse(localStorage.getItem("columnOrder")) || [];
+      let columnWidths = JSON.parse(localStorage.getItem("columnWidths")) || {};
+
+      let isResizing = false;
+      let wasResized = false;
+      let isDragging = false;
+      let wasDragged = false;
+
+      let currentResizingTh = null;
+      let startX = 0;
+      let startWidth = 0;
+      let lastMouseX = null;
+      let resizingRequested = false;
+
+      function pasteJson() {
+        navigator.clipboard.readText().then((text) => {
+          try {
+            const data = JSON.parse(text);
+            if (Array.isArray(data)) {
+              generateTable(data);
+              applyHiddenColumns();
+              applyColumnOrder();
+              updateHiddenColumnsDropdown();
+              applyColumnWidths();
+              setInitialColumnWidths();
+            } else {
+              alert("JSON is not an array.");
+            }
+          } catch (err) {
+            alert("Invalid JSON format.");
+          }
+        });
+      }
+
+      function generateTable(data) {
+        const tableHead = document.getElementById("tableHead");
+        const tableBody = document.getElementById("tableBody");
+
+        sortDirections = {};
+        const headers = columnOrder.length ? columnOrder : Object.keys(data[0]);
+
+        let theadHTML = '<tr>';
+        headers.forEach((header) => {
+          sortDirections[header] = true;
+          theadHTML += `
+            <th data-column="${header}">
+              <span class="column-name">${header}</span>
+              <span class="sort-arrow" style="margin-left:4px;display:inline-block;"></span>
+              <span class="drag-handle" draggable="true" style="margin-left:8px;">&#9776;</span>
+              <div class="resizer" draggable="false"></div>
+            </th>`;
+        });
+        theadHTML += '</tr>';
+        tableHead.innerHTML = theadHTML;
+
+        let tbodyHTML = '';
+        data.forEach(item => {
+          tbodyHTML += '<tr>';
+          headers.forEach(header => {
+            const val = item[header] || '';
+            tbodyHTML += `<td data-column="${header}">${val}</td>`;
+          });
+          tbodyHTML += '</tr>';
+        });
+        tableBody.innerHTML = tbodyHTML;
+
+        addEventListenersToHeaders();
+      }
+
+      function addEventListenersToHeaders() {
+        const tableHead = document.getElementById("tableHead");
+        const ths = tableHead.querySelectorAll('th');
+
+        ths.forEach((th) => {
+          const header = th.getAttribute('data-column');
+          const dragHandle = th.querySelector('.drag-handle');
+          const resizer = th.querySelector('.resizer');
+
+          dragHandle.ondragstart = (e) => {
+            isDragging = true;
+            wasDragged = false;
+            handleDragStart(e, header);
+          };
+
+          // Обработчик dragend для сброса состояний при отпускании за пределами заголовка/таблицы
+          dragHandle.ondragend = () => {
+            isDragging = false;
+            wasDragged = false;
+          };
+
+          th.onclick = (e) => {
+            if (isResizing || wasResized || isDragging || wasDragged) return;
+            if (e.target === dragHandle || e.target === resizer) return;
+            sortTableByColumn(header);
+            updateHeaderClasses(header);
+          };
+
+          th.oncontextmenu = (e) => {
+            e.preventDefault();
+            hideColumn(header);
+          };
+
+          th.ondragover = handleDragOver;
+          th.ondrop = (e) => {
+            handleDrop(e, header);
+            wasDragged = true;
+            isDragging = false;
+          };
+
+          resizer.addEventListener('mousedown', (e) => initResize(e, th));
+        });
+      }
+
+      function setInitialColumnWidths() {
+        const ths = document.querySelectorAll('#tableHead th');
+        ths.forEach((th) => {
+          const colName = th.dataset.column;
+          if (!columnWidths[colName]) {
+            const width = th.scrollWidth;
+            th.style.width = width + 'px';
+          }
+        });
+      }
+
+      function applyColumnWidths() {
+        const ths = document.querySelectorAll('#tableHead th');
+        ths.forEach((th) => {
+          const colName = th.dataset.column;
+          if (columnWidths[colName]) {
+            th.style.width = columnWidths[colName] + 'px';
+          }
+        });
+      }
+
+      function sortTableByColumn(column) {
+        const tableBody = document.getElementById("tableBody");
+        const rows = Array.from(tableBody.rows);
+        const columnIndex = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        ).findIndex((cell) => cell.dataset.column === column);
+
+        rows.sort((a, b) => {
+          const aText = a.cells[columnIndex]?.textContent || "";
+          const bText = b.cells[columnIndex]?.textContent || "";
+          const direction = sortDirections[column] ? 1 : -1;
+          return direction * aText.localeCompare(bText, undefined, { numeric: true });
+        });
+
+        sortDirections[column] = !sortDirections[column];
+
+        const fragment = document.createDocumentFragment();
+        rows.forEach((row) => fragment.appendChild(row));
+        tableBody.innerHTML = '';
+        tableBody.appendChild(fragment);
+      }
+
+      function filterTable() {
+        const filter = document.getElementById("filter").value.toLowerCase();
+        const rows = document.getElementById("tableBody").rows;
+
+        for (let row of rows) {
+          const cells = Array.from(row.cells);
+          const matches = cells.some((cell) =>
+            cell.textContent.toLowerCase().includes(filter)
+          );
+          row.style.display = matches ? "" : "none";
+        }
+      }
+
+      function updateHeaderClasses(activeColumn) {
+        const headers = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        );
+        headers.forEach((header) => {
+          header.classList.remove("sort-asc", "sort-desc");
+          const arrowSpan = header.querySelector(".sort-arrow");
+          if (arrowSpan) arrowSpan.textContent = "";
+
+          if (header.dataset.column === activeColumn) {
+            const direction = sortDirections[activeColumn];
+            if (direction) {
+              header.classList.add("sort-asc");
+              if (arrowSpan) arrowSpan.textContent = "▲";
+            } else {
+              header.classList.add("sort-desc");
+              if (arrowSpan) arrowSpan.textContent = "▼";
+            }
+          }
+        });
+      }
+
+      function hideColumn(column) {
+        const columnIndex = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        ).findIndex((cell) => cell.dataset.column === column);
+        if (columnIndex === -1) return;
+
+        document
+          .getElementById("tableHead")
+          .rows[0].cells[columnIndex].classList.add("hidden");
+
+        Array.from(document.getElementById("tableBody").rows).forEach((row) => {
+          row.cells[columnIndex].classList.add("hidden");
+        });
+
+        if (!hiddenColumns.includes(column)) {
+          hiddenColumns.push(column);
+          localStorage.setItem("hiddenColumns", JSON.stringify(hiddenColumns));
+          updateHiddenColumnsDropdown();
+        }
+      }
+
+      function restoreColumn(column) {
+        const columnIndex = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        ).findIndex((cell) => cell.dataset.column === column);
+        if (columnIndex === -1) return;
+
+        document
+          .getElementById("tableHead")
+          .rows[0].cells[columnIndex].classList.remove("hidden");
+
+        Array.from(document.getElementById("tableBody").rows).forEach((row) => {
+          row.cells[columnIndex].classList.remove("hidden");
+        });
+
+        hiddenColumns = hiddenColumns.filter((col) => col !== column);
+        localStorage.setItem("hiddenColumns", JSON.stringify(hiddenColumns));
+        updateHiddenColumnsDropdown();
+      }
+
+      function updateHiddenColumnsDropdown() {
+        const dropdown = document.getElementById("hiddenColumnsDropdown");
+        dropdown.innerHTML =
+          '<option value="" disabled selected>Restore Hidden Columns</option>';
+        hiddenColumns.forEach((hiddenColumn) => {
+          const headers = Array.from(
+            document.getElementById("tableHead").rows[0].cells
+          );
+          if (headers.some((header) => header.dataset.column === hiddenColumn)) {
+            const option = document.createElement("option");
+            option.value = hiddenColumn;
+            option.textContent = hiddenColumn;
+            dropdown.appendChild(option);
+          }
+        });
+      }
+
+      function applyHiddenColumns() {
+        const headers = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        );
+        hiddenColumns.forEach((hiddenColumn) => {
+          const columnIndex = headers.findIndex(
+            (cell) => cell.dataset.column === hiddenColumn
+          );
+          if (columnIndex === -1) return;
+
+          headers[columnIndex].classList.add("hidden");
+
+          Array.from(document.getElementById("tableBody").rows).forEach(
+            (row) => {
+              row.cells[columnIndex].classList.add("hidden");
+            }
+          );
+        });
+      }
+
+      function handleDragStart(e, column) {
+        e.dataTransfer.setData("text/plain", column);
+      }
+
+      function handleDragOver(e) {
+        e.preventDefault();
+      }
+
+      function handleDrop(e, targetColumn) {
+        e.preventDefault();
+        const draggedColumn = e.dataTransfer.getData("text/plain");
+
+        const headers = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        );
+        const draggedIndex = headers.findIndex(
+          (cell) => cell.dataset.column === draggedColumn
+        );
+        const targetIndex = headers.findIndex(
+          (cell) => cell.dataset.column === targetColumn
+        );
+
+        if (
+          draggedIndex === -1 ||
+          targetIndex === -1 ||
+          draggedIndex === targetIndex
+        )
+          return;
+
+        headers[targetIndex].parentNode.insertBefore(
+          headers[draggedIndex],
+          headers[targetIndex]
+        );
+
+        const tableBody = document.getElementById("tableBody");
+        const rows = Array.from(tableBody.rows);
+        rows.forEach((row) => {
+          const cells = Array.from(row.cells);
+          row.insertBefore(cells[draggedIndex], cells[targetIndex]);
+        });
+
+        saveColumnOrder();
+      }
+
+      function saveColumnOrder() {
+        const headers = Array.from(
+          document.getElementById("tableHead").rows[0].cells
+        );
+        columnOrder = headers.map((header) => header.dataset.column);
+        localStorage.setItem("columnOrder", JSON.stringify(columnOrder));
+      }
+
+      function applyColumnOrder() {
+        if (!columnOrder.length) return;
+        const tableHead = document.getElementById("tableHead");
+        const tableBody = document.getElementById("tableBody");
+
+        const headers = Array.from(tableHead.rows[0].cells);
+        columnOrder.forEach((columnName, index) => {
+          const currentIndex = headers.findIndex(
+            (cell) => cell.dataset.column === columnName
+          );
+          if (currentIndex !== index && currentIndex !== -1) {
+            tableHead.rows[0].insertBefore(headers[currentIndex], headers[index]);
+            Array.from(tableBody.rows).forEach((row) => {
+              const cells = Array.from(row.cells);
+              row.insertBefore(cells[currentIndex], cells[index]);
+            });
+          }
+        });
+      }
+
+      function initResize(e, th) {
+        e.stopPropagation();
+        e.preventDefault();
+        isResizing = true;
+        wasResized = false;
+        currentResizingTh = th;
+        startX = e.clientX;
+        startWidth = th.offsetWidth;
+        lastMouseX = e.clientX;
+        document.addEventListener('mousemove', onMouseMoveResize);
+        document.addEventListener('mouseup', stopResize);
+      }
+
+      function onMouseMoveResize(e) {
+        e.preventDefault(); 
+        wasResized = true;
+        lastMouseX = e.clientX;
+        if (!resizingRequested) {
+          resizingRequested = true;
+          requestAnimationFrame(applyResize);
+        }
+      }
+
+      function applyResize() {
+        if (!currentResizingTh) return;
+        const diff = lastMouseX - startX;
+        const newWidth = startWidth + diff;
+        if (newWidth > 30) {
+          currentResizingTh.style.width = newWidth + 'px';
+        }
+        resizingRequested = false;
+      }
+
+      function stopResize() {
+        document.removeEventListener('mousemove', onMouseMoveResize);
+        document.removeEventListener('mouseup', stopResize);
+        if (currentResizingTh) {
+          const colName = currentResizingTh.dataset.column;
+          const newWidth = parseInt(currentResizingTh.style.width, 10);
+          columnWidths[colName] = newWidth;
+          localStorage.setItem("columnWidths", JSON.stringify(columnWidths));
+        }
+        currentResizingTh = null;
+        isResizing = false;
+      }
+
+      document.addEventListener('mouseup', () => {
+        if (!isResizing) wasResized = false;
+        if (!isDragging) wasDragged = false;
+      });
+    </script>
+  </body>
+</html>
